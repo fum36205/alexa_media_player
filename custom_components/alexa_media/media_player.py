@@ -50,6 +50,7 @@ from . import (
     hide_serial,
 )
 from .alexa_media import AlexaMedia
+from .amazon_music_queue import play_asin
 from .const import (
     DEPENDENT_ALEXA_COMPONENTS,
     MIN_TIME_BETWEEN_FORCED_SCANS,
@@ -1998,6 +1999,16 @@ class AlexaClient(MediaPlayerDevice, AlexaMedia):
                     queue_delay=queue_delay,
                     **kwargs,
                 )
+        elif media_type == "AMAZON_MUSIC_ASIN":
+            # The exact recording by catalog ID, not voice search. Awaited, unlike
+            # the voice search below, so a failure reaches the caller.
+            await play_asin(
+                self._login,
+                customer_id=self._customer_id,
+                serial=self._device_serial_number,
+                device_type=self._device_type,
+                asin=media_id,
+            )
         else:
             _LOGGER.debug(
                 "%s: %s:Playing music %s on %s with queue_delay %s",
