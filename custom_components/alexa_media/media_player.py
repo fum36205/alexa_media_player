@@ -51,7 +51,7 @@ from . import (
     hide_serial,
 )
 from .alexa_media import AlexaMedia
-from .amazon_music_queue import play_asin
+from .amazon_music_queue import play_asins
 from .const import (
     DEPENDENT_ALEXA_COMPONENTS,
     MIN_TIME_BETWEEN_FORCED_SCANS,
@@ -2081,14 +2081,15 @@ class AlexaClient(MediaPlayerDevice, AlexaMedia):
                     **kwargs,
                 )
         elif media_type == "AMAZON_MUSIC_ASIN":
-            # The exact recording by catalog ID, not voice search. Awaited, unlike
+            # The exact recordings by catalog ID, not voice search. Awaited, unlike
             # the voice search below, so a failure reaches the caller.
-            await play_asin(
+            await play_asins(
                 self._login,
                 customer_id=self._customer_id,
                 serial=self._device_serial_number,
                 device_type=self._device_type,
-                asin=media_id,
+                # Several IDs, comma-separated, play in this order.
+                asins=[asin.strip() for asin in media_id.split(",") if asin.strip()],
             )
         else:
             _LOGGER.debug(

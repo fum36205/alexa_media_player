@@ -1,8 +1,8 @@
-"""Play one Amazon Music track on an Echo by ASIN.
+"""Play Amazon Music tracks on an Echo by ASIN.
 
-Amazon starts a specific track on an Echo in two calls, the same ones the Amazon
+Amazon starts specific tracks on an Echo in two calls, the same ones the Amazon
 Music app makes when it casts to an Echo: AppSync ``InitiateQueue`` creates a
-queue that holds the track and targets the Echo, then the Music Play Queue
+queue that holds the tracks and targets the Echo, then the Music Play Queue
 Service ``transferQueue`` starts that queue on the Echo. Unlike voice search this
 plays the exact recording, and the Echo does not announce it. Both endpoints are
 unofficial and may change without notice.
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -39,17 +40,23 @@ INITIATE_QUEUE_MUTATION = """mutation InitiateQueue($input: InitiateQueueInput!)
 }"""
 
 
-async def play_asin(login, *, customer_id: str, serial: str, device_type: str, asin: str) -> None:
-    """Start the track ``asin`` on the Echo ``serial``.
+async def play_asins(login, *, customer_id: str, serial: str, device_type: str, asins: list[str]) -> None:
+    """Start the tracks ``asins`` on the Echo ``serial``, in this order.
 
     Raises HomeAssistantError when the token cannot be refreshed or Amazon refuses
     either call, so the caller learns that nothing is playing.
     """
+    if not asins:
+        raise HomeAssistantError("No Amazon Music track ID given")
+    malformed = [asin for asin in asins if not re.fullmatch(r"[A-Z0-9]{10}", asin)]
+    if malformed:
+        # Checked before Amazon sees it: a pasted share link would otherwise fail with an unclear Amazon error.
+        raise HomeAssistantError(f"Not Amazon Music track IDs: {', '.join(malformed)}")
     await _ensure_fresh_access_token(login)
     target_id = f"{customer_id}-{serial}-{device_type}"
-    queue_id, entity_reference_id = await _initiate_queue(login, customer_id, target_id, device_type, asin)
+    queue_id, entity_reference_id = await _initiate_queue(login, customer_id, target_id, device_type, asins)
     await _transfer_queue(login, target_id, queue_id, entity_reference_id)
-    _LOGGER.debug("Started ASIN %s on %s", asin, serial)
+    _LOGGER.debug("Started ASINs %s on %s", asins, serial)
 
 
 async def _ensure_fresh_access_token(login) -> None:
@@ -68,7 +75,7 @@ async def _ensure_fresh_access_token(login) -> None:
         await login.finalize_login()
 
 
-async def _initiate_queue(login, customer_id: str, target_id: str, device_type: str, asin: str) -> tuple[str, str]:
+async def _initiate_queue(login, customer_id: str, target_id: str, device_type: str, asins: list[str]) -> tuple[str, str]:
     authorization = json.dumps(
         {
             "accessToken": login.access_token,
@@ -82,7 +89,7 @@ async def _initiate_queue(login, customer_id: str, target_id: str, device_type: 
         "targetDeviceContext": {"deviceType": device_type, "deviceId": target_id},
         "deviceContext": {"deviceType": ALEXAPY_DEVICE_TYPE, "deviceId": login.uuid},
         "playbackOptions": {"shuffleMode": "SHUFFLE_OFF", "sequencingRuleEnumValue": "SHUFFLE_OFF", "loopMode": "LOOP_OFF"},
-        "startAt": {"offsetInMs": 0, "queueEntityId": asin, "queueEntityIdType": "CATALOG_TRACK_ID"},
+        "startAt": {"offsetInMs": 0, "queueEntityId": asins[0], "queueEntityIdType": "CATALOG_TRACK_ID"},
         "queueSeeds": [
             {
                 "playModeEnumValue": "ON_DEMAND",
@@ -90,7 +97,10 @@ async def _initiate_queue(login, customer_id: str, target_id: str, device_type: 
                 "queueSeedType": "QUEUE_ID_HISTORICAL_PLAYBACK",
                 "queueSeedTypeEnumValue": "TRACK_LIST",
                 # metricsContext is required; the app fills it with analytics tuples, Amazon accepts it empty.
-                "trackList": {"metricsContext": {"metricTuple": []}, "tracks": [{"idType": "ASIN", "id": asin}]},
+                "trackList": {
+                    "metricsContext": {"metricTuple": []},
+                    "tracks": [{"idType": "ASIN", "id": asin} for asin in asins],
+                },
             }
         ],
         "allowedParentalControls": {"hasExplicitLanguage": True},
@@ -105,7 +115,9 @@ async def _initiate_queue(login, customer_id: str, target_id: str, device_type: 
     )
     initiated = ((response.get("data") or {}).get("initiateQueue") if isinstance(response, dict) else None)
     if status != 200 or not initiated:
-        raise HomeAssistantError(f"Amazon InitiateQueue failed for ASIN {asin}: HTTP {status} {_error_summary(response)}")
+        raise HomeAssistantError(
+            f"Amazon InitiateQueue failed for ASINs {', '.join(asins)}: HTTP {status} {_error_summary(response)}"
+        )
     return initiated["queueMetadata"]["queueId"], initiated["genericQueueEntity"]["entityReferenceId"]
 
 

@@ -1,7 +1,7 @@
-"""Tests for playing one Amazon Music track on an Echo by ASIN.
+"""Tests for playing Amazon Music tracks on an Echo by ASIN.
 
-Amazon starts a specific track on an Echo in two calls: AppSync ``InitiateQueue``
-creates a queue holding the track with the Echo as target, then the Music Play
+Amazon starts specific tracks on an Echo in two calls: AppSync ``InitiateQueue``
+creates a queue holding the tracks with the Echo as target, then the Music Play
 Queue Service ``transferQueue`` starts that queue on the Echo. Unlike voice
 search, this plays the exact recording and the Echo does not announce it.
 """
@@ -17,7 +17,7 @@ from homeassistant.exceptions import HomeAssistantError
 from custom_components.alexa_media.amazon_music_queue import (
     APPSYNC_URL,
     MPQS_URL,
-    play_asin,
+    play_asins,
 )
 from custom_components.alexa_media.const import DATA_ALEXAMEDIA
 from custom_components.alexa_media.media_player import AlexaClient
@@ -81,8 +81,8 @@ async def test_transfers_the_queue_that_initiate_queue_created(login, aioclient_
     aioclient_mock.post(APPSYNC_URL, json=INITIATE_QUEUE_RESPONSE)
     aioclient_mock.post(MPQS_URL, json=TRANSFER_QUEUE_SUCCESS)
 
-    await play_asin(
-        login, customer_id="CUSTOMER", serial="ECHO_SERIAL", device_type="ECHO_TYPE", asin="B001S0HA3G"
+    await play_asins(
+        login, customer_id="CUSTOMER", serial="ECHO_SERIAL", device_type="ECHO_TYPE", asins=["B001S0HA3G"]
     )
 
     url, body, headers = _requests(aioclient_mock)[1]
@@ -98,12 +98,16 @@ async def test_transfers_the_queue_that_initiate_queue_created(login, aioclient_
     }
 
 
-async def test_initiate_queue_asks_for_the_asin_on_the_echo(login, aioclient_mock):
+async def test_initiate_queue_asks_for_the_asins_on_the_echo_in_order(login, aioclient_mock):
     aioclient_mock.post(APPSYNC_URL, json=INITIATE_QUEUE_RESPONSE)
     aioclient_mock.post(MPQS_URL, json=TRANSFER_QUEUE_SUCCESS)
 
-    await play_asin(
-        login, customer_id="CUSTOMER", serial="ECHO_SERIAL", device_type="ECHO_TYPE", asin="B076NWZ659"
+    await play_asins(
+        login,
+        customer_id="CUSTOMER",
+        serial="ECHO_SERIAL",
+        device_type="ECHO_TYPE",
+        asins=["B09C48YPXX", "B076NWZ659", "B079VRV49X"],
     )
 
     url, body, headers = _requests(aioclient_mock)[0]
@@ -119,8 +123,12 @@ async def test_initiate_queue_asks_for_the_asin_on_the_echo(login, aioclient_moc
         "deviceType": "ECHO_TYPE",
         "deviceId": "CUSTOMER-ECHO_SERIAL-ECHO_TYPE",
     }
-    assert queue_input["queueSeeds"][0]["trackList"]["tracks"] == [{"idType": "ASIN", "id": "B076NWZ659"}]
-    assert queue_input["startAt"]["queueEntityId"] == "B076NWZ659"
+    assert queue_input["queueSeeds"][0]["trackList"]["tracks"] == [
+        {"idType": "ASIN", "id": "B09C48YPXX"},
+        {"idType": "ASIN", "id": "B076NWZ659"},
+        {"idType": "ASIN", "id": "B079VRV49X"},
+    ]
+    assert queue_input["startAt"]["queueEntityId"] == "B09C48YPXX"
 
 
 async def test_graphql_errors_raise_without_transferring(login, aioclient_mock):
@@ -128,8 +136,8 @@ async def test_graphql_errors_raise_without_transferring(login, aioclient_mock):
     aioclient_mock.post(MPQS_URL, json=TRANSFER_QUEUE_SUCCESS)
 
     with pytest.raises(HomeAssistantError, match="coerced Null value"):
-        await play_asin(
-            login, customer_id="CUSTOMER", serial="ECHO_SERIAL", device_type="ECHO_TYPE", asin="B001S0HA3G"
+        await play_asins(
+            login, customer_id="CUSTOMER", serial="ECHO_SERIAL", device_type="ECHO_TYPE", asins=["B001S0HA3G"]
         )
 
     assert [url for url, _, _ in _requests(aioclient_mock)] == [APPSYNC_URL]
@@ -140,8 +148,8 @@ async def test_failed_transfer_raises(login, aioclient_mock):
     aioclient_mock.post(MPQS_URL, status=500, json=TRANSFER_QUEUE_INTERNAL_FAILURE)
 
     with pytest.raises(HomeAssistantError, match="InternalFailure"):
-        await play_asin(
-            login, customer_id="CUSTOMER", serial="ECHO_SERIAL", device_type="ECHO_TYPE", asin="B001S0HA3G"
+        await play_asins(
+            login, customer_id="CUSTOMER", serial="ECHO_SERIAL", device_type="ECHO_TYPE", asins=["B001S0HA3G"]
         )
 
 
@@ -160,8 +168,8 @@ async def test_expired_token_is_refreshed_before_initiate_queue(login, aioclient
     login.get_csrf = AsyncMock(return_value=True)
     login.finalize_login = AsyncMock()
 
-    await play_asin(
-        login, customer_id="CUSTOMER", serial="ECHO_SERIAL", device_type="ECHO_TYPE", asin="B001S0HA3G"
+    await play_asins(
+        login, customer_id="CUSTOMER", serial="ECHO_SERIAL", device_type="ECHO_TYPE", asins=["B001S0HA3G"]
     )
 
     _, _, headers = _requests(aioclient_mock)[0]
@@ -173,8 +181,8 @@ async def test_failed_token_refresh_raises_without_calling_amazon(login, aioclie
     login.refresh_access_token = AsyncMock(return_value=False)
 
     with pytest.raises(HomeAssistantError, match="refresh"):
-        await play_asin(
-            login, customer_id="CUSTOMER", serial="ECHO_SERIAL", device_type="ECHO_TYPE", asin="B001S0HA3G"
+        await play_asins(
+            login, customer_id="CUSTOMER", serial="ECHO_SERIAL", device_type="ECHO_TYPE", asins=["B001S0HA3G"]
         )
 
     assert aioclient_mock.call_count == 0
@@ -222,6 +230,35 @@ async def test_play_media_with_an_asin_raises_to_the_caller(echo, aioclient_mock
 
     with pytest.raises(HomeAssistantError):
         await echo.async_play_media("AMAZON_MUSIC_ASIN", "B001S0HA3G")
+
+
+async def test_play_media_plays_comma_separated_asins_in_order(echo, aioclient_mock):
+    aioclient_mock.post(APPSYNC_URL, json=INITIATE_QUEUE_RESPONSE)
+    aioclient_mock.post(MPQS_URL, json=TRANSFER_QUEUE_SUCCESS)
+
+    await echo.async_play_media("AMAZON_MUSIC_ASIN", " B09C48YPXX, B076NWZ659,,B079VRV49X ")
+
+    _, body, _ = _requests(aioclient_mock)[0]
+    assert body["variables"]["input"]["queueSeeds"][0]["trackList"]["tracks"] == [
+        {"idType": "ASIN", "id": "B09C48YPXX"},
+        {"idType": "ASIN", "id": "B076NWZ659"},
+        {"idType": "ASIN", "id": "B079VRV49X"},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("media_id", "error"),
+    [
+        # A whole share link pasted instead of the ID after "trackAsin=".
+        ("B09C48YPXX, https://music.amazon.de/albums/B09C46238P?trackAsin=B09C48YPXX", "music.amazon.de/albums"),
+        (" , ", "No Amazon Music track ID"),
+    ],
+)
+async def test_play_media_rejects_anything_but_asins_before_calling_amazon(echo, aioclient_mock, media_id, error):
+    with pytest.raises(HomeAssistantError, match=error):
+        await echo.async_play_media("AMAZON_MUSIC_ASIN", media_id)
+
+    assert aioclient_mock.call_count == 0
 
 
 async def test_other_content_types_still_use_voice_search(echo, aioclient_mock):
