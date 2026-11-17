@@ -1,8 +1,8 @@
-"""Play Amazon Music tracks on an Echo by ASIN.
+"""Play Amazon Music tracks or albums on an Echo by ASIN.
 
 Amazon starts specific tracks on an Echo in two calls, the same ones the Amazon
 Music app makes when it casts to an Echo: AppSync ``InitiateQueue`` creates a
-queue that holds the tracks and targets the Echo, then the Music Play Queue
+queue that holds the tracks (or the albums) and targets the Echo, then the Music Play Queue
 Service ``transferQueue`` starts that queue on the Echo. Unlike voice search this
 plays the exact recording, and the Echo does not announce it. Both endpoints are
 unofficial and may change without notice.
@@ -27,6 +27,9 @@ MPQS_URL = "https://music.amazon.com/ZAZ/api/mpqs/voiceenabled/"
 # queue API wants the device registration the access token belongs to.
 ALEXAPY_DEVICE_TYPE = "A2IVLV5VM2W81"
 
+# Amazon catalog IDs of tracks and albums, such as B09C48YPXX.
+ASIN_PATTERN = re.compile(r"[A-Z0-9]{10}")
+
 TRANSFER_QUEUE_TARGET = (
     "com.amazon.musicplayqueueservice.model.client.external.voiceenabled."
     "MusicPlayQueueServiceExternalVoiceEnabledClient.transferQueue"
@@ -48,15 +51,73 @@ async def play_asins(login, *, customer_id: str, serial: str, device_type: str, 
     """
     if not asins:
         raise HomeAssistantError("No Amazon Music track ID given")
-    malformed = [asin for asin in asins if not re.fullmatch(r"[A-Z0-9]{10}", asin)]
+    malformed = [asin for asin in asins if not ASIN_PATTERN.fullmatch(asin)]
     if malformed:
         # Checked before Amazon sees it: a pasted share link would otherwise fail with an unclear Amazon error.
         raise HomeAssistantError(f"Not Amazon Music track IDs: {', '.join(malformed)}")
+    queue_seed = {
+        "playModeEnumValue": "ON_DEMAND",
+        # Required; the Amazon Music app sends this legacy value next to the real enum value.
+        "queueSeedType": "QUEUE_ID_HISTORICAL_PLAYBACK",
+        "queueSeedTypeEnumValue": "TRACK_LIST",
+        # metricsContext is required; the app fills it with analytics tuples, Amazon accepts it empty.
+        "trackList": {
+            "metricsContext": {"metricTuple": []},
+            "tracks": [{"idType": "ASIN", "id": asin} for asin in asins],
+        },
+    }
+    start_at = {"offsetInMs": 0, "queueEntityId": asins[0], "queueEntityIdType": "CATALOG_TRACK_ID"}
+    await _start_queue(
+        login, customer_id, serial, device_type, [queue_seed], start_at, content=f"ASINs {', '.join(asins)}"
+    )
+
+
+async def play_albums(login, *, customer_id: str, serial: str, device_type: str, album_asins: list[str]) -> None:
+    """Start the albums ``album_asins`` on the Echo ``serial``, one after the other, from the first one's first track.
+
+    Raises HomeAssistantError like ``play_asins``.
+    """
+    if not album_asins:
+        raise HomeAssistantError("No Amazon Music album ID given")
+    malformed = [album_asin for album_asin in album_asins if not ASIN_PATTERN.fullmatch(album_asin)]
+    if malformed:
+        raise HomeAssistantError(f"Not Amazon Music album IDs: {', '.join(malformed)}")
+    # The seed the Amazon Music app sends when it casts an album (captured 2026-11-16). Sending
+    # the album ID as a track instead fails with a DependencyException. The app sends one album
+    # per request; Amazon also queues several, in order (tested 2026-11-17 with two).
+    queue_seeds = [
+        {
+            "seedContext": [],
+            "playModeEnumValue": "ON_DEMAND",
+            "queueSeedType": "QUEUE_ID_HISTORICAL_PLAYBACK",
+            "queueSeedTypeEnumValue": "PLAYABLE_ENTITY_ID",
+            "playableEntity": {"idType": "ASIN", "id": album_asin, "metricsContext": {"metricTuple": []}},
+        }
+        for album_asin in album_asins
+    ]
+    # No start position, like the app: Amazon starts at the first album's first track.
+    await _start_queue(
+        login, customer_id, serial, device_type, queue_seeds, None, content=f"albums {', '.join(album_asins)}"
+    )
+
+
+async def _start_queue(
+    login,
+    customer_id: str,
+    serial: str,
+    device_type: str,
+    queue_seeds: list[dict[str, Any]],
+    start_at: dict[str, Any] | None,
+    *,
+    content: str,
+) -> None:
     await _ensure_fresh_access_token(login)
     target_id = f"{customer_id}-{serial}-{device_type}"
-    queue_id, entity_reference_id = await _initiate_queue(login, customer_id, target_id, device_type, asins)
+    queue_id, entity_reference_id = await _initiate_queue(
+        login, customer_id, target_id, device_type, queue_seeds, start_at, content=content
+    )
     await _transfer_queue(login, target_id, queue_id, entity_reference_id)
-    _LOGGER.debug("Started ASINs %s on %s", asins, serial)
+    _LOGGER.debug("Started %s on %s", content, serial)
 
 
 async def _ensure_fresh_access_token(login) -> None:
@@ -75,7 +136,16 @@ async def _ensure_fresh_access_token(login) -> None:
         await login.finalize_login()
 
 
-async def _initiate_queue(login, customer_id: str, target_id: str, device_type: str, asins: list[str]) -> tuple[str, str]:
+async def _initiate_queue(
+    login,
+    customer_id: str,
+    target_id: str,
+    device_type: str,
+    queue_seeds: list[dict[str, Any]],
+    start_at: dict[str, Any] | None,
+    *,
+    content: str,
+) -> tuple[str, str]:
     authorization = json.dumps(
         {
             "accessToken": login.access_token,
@@ -89,23 +159,12 @@ async def _initiate_queue(login, customer_id: str, target_id: str, device_type: 
         "targetDeviceContext": {"deviceType": device_type, "deviceId": target_id},
         "deviceContext": {"deviceType": ALEXAPY_DEVICE_TYPE, "deviceId": login.uuid},
         "playbackOptions": {"shuffleMode": "SHUFFLE_OFF", "sequencingRuleEnumValue": "SHUFFLE_OFF", "loopMode": "LOOP_OFF"},
-        "startAt": {"offsetInMs": 0, "queueEntityId": asins[0], "queueEntityIdType": "CATALOG_TRACK_ID"},
-        "queueSeeds": [
-            {
-                "playModeEnumValue": "ON_DEMAND",
-                # Required; the Amazon Music app sends this legacy value next to the real enum value.
-                "queueSeedType": "QUEUE_ID_HISTORICAL_PLAYBACK",
-                "queueSeedTypeEnumValue": "TRACK_LIST",
-                # metricsContext is required; the app fills it with analytics tuples, Amazon accepts it empty.
-                "trackList": {
-                    "metricsContext": {"metricTuple": []},
-                    "tracks": [{"idType": "ASIN", "id": asin} for asin in asins],
-                },
-            }
-        ],
+        "queueSeeds": queue_seeds,
         "allowedParentalControls": {"hasExplicitLanguage": True},
         "customerId": customer_id,
     }
+    if start_at is not None:
+        queue_input["startAt"] = start_at
     headers = {
         "authorization": authorization,
         "x-amz-date": time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()),
@@ -116,7 +175,7 @@ async def _initiate_queue(login, customer_id: str, target_id: str, device_type: 
     initiated = ((response.get("data") or {}).get("initiateQueue") if isinstance(response, dict) else None)
     if status != 200 or not initiated:
         raise HomeAssistantError(
-            f"Amazon InitiateQueue failed for ASINs {', '.join(asins)}: HTTP {status} {_error_summary(response)}"
+            f"Amazon InitiateQueue failed for {content}: HTTP {status} {_error_summary(response)}"
         )
     return initiated["queueMetadata"]["queueId"], initiated["genericQueueEntity"]["entityReferenceId"]
 

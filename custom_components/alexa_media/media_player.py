@@ -51,7 +51,7 @@ from . import (
     hide_serial,
 )
 from .alexa_media import AlexaMedia
-from .amazon_music_queue import play_asins
+from .amazon_music_queue import play_albums, play_asins
 from .const import (
     DEPENDENT_ALEXA_COMPONENTS,
     MIN_TIME_BETWEEN_FORCED_SCANS,
@@ -2090,6 +2090,20 @@ class AlexaClient(MediaPlayerDevice, AlexaMedia):
                 device_type=self._device_type,
                 # Several IDs, comma-separated, play in this order.
                 asins=[asin.strip() for asin in media_id.split(",") if asin.strip()],
+            )
+        elif media_type == "AMAZON_MUSIC_ALBUM":
+            # Whole albums by catalog ID, awaited for the same reason.
+            await play_albums(
+                self._login,
+                customer_id=self._customer_id,
+                serial=self._device_serial_number,
+                device_type=self._device_type,
+                # Several IDs, comma-separated, play one after the other.
+                album_asins=[
+                    album_asin.strip()
+                    for album_asin in media_id.split(",")
+                    if album_asin.strip()
+                ],
             )
         else:
             _LOGGER.debug(

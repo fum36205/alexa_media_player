@@ -17,6 +17,7 @@ from homeassistant.exceptions import HomeAssistantError
 from custom_components.alexa_media.amazon_music_queue import (
     APPSYNC_URL,
     MPQS_URL,
+    play_albums,
     play_asins,
 )
 from custom_components.alexa_media.const import DATA_ALEXAMEDIA
@@ -36,6 +37,25 @@ INITIATE_QUEUE_RESPONSE = {
                 "identifier": "B001S0HA3G",
                 "identifierType": "CATALOG_TRACK_ID",
                 "title": "Hedwig's Theme",
+            },
+        }
+    }
+}
+# Recorded 2026-11-16 when the Amazon Music app cast the album "Sun" (B09C46238P):
+# Amazon starts the queue at the album's first track, "Before Time". Sending "Sun"
+# and "Evolve" in one request on 2026-11-17 got the same answer.
+INITIATE_QUEUE_ALBUM_RESPONSE = {
+    "data": {
+        "initiateQueue": {
+            "queueMetadata": {
+                "queueId": "5e0b7c21-3f4a-4d8e-9b16-c2a7f0d93e45",
+                "title": "Sun",
+            },
+            "genericQueueEntity": {
+                "entityReferenceId": "a3c9e1f7-2b5d-4e08-8f6a-71d4b0c2e953",
+                "identifier": "B09C473JSN",
+                "identifierType": "CATALOG_TRACK_ID",
+                "title": "Before Time",
             },
         }
     }
@@ -129,6 +149,43 @@ async def test_initiate_queue_asks_for_the_asins_on_the_echo_in_order(login, aio
         {"idType": "ASIN", "id": "B079VRV49X"},
     ]
     assert queue_input["startAt"]["queueEntityId"] == "B09C48YPXX"
+
+
+async def test_albums_are_seeded_one_entity_each_in_order_and_transferred_from_amazons_first_track(
+    login, aioclient_mock
+):
+    aioclient_mock.post(APPSYNC_URL, json=INITIATE_QUEUE_ALBUM_RESPONSE)
+    aioclient_mock.post(MPQS_URL, json=TRANSFER_QUEUE_SUCCESS)
+
+    await play_albums(
+        login,
+        customer_id="CUSTOMER",
+        serial="ECHO_SERIAL",
+        device_type="ECHO_TYPE",
+        album_asins=["B09C46238P", "B079VLSTG6"],
+    )
+
+    (_, initiate_body, _), (_, transfer_body, _) = _requests(aioclient_mock)
+    queue_input = initiate_body["variables"]["input"]
+    # The seed the Amazon Music app sent for one album on 2026-11-16, once per album.
+    assert queue_input["queueSeeds"] == [
+        {
+            "seedContext": [],
+            "playModeEnumValue": "ON_DEMAND",
+            "queueSeedType": "QUEUE_ID_HISTORICAL_PLAYBACK",
+            "queueSeedTypeEnumValue": "PLAYABLE_ENTITY_ID",
+            "playableEntity": {"idType": "ASIN", "id": "B09C46238P", "metricsContext": {"metricTuple": []}},
+        },
+        {
+            "seedContext": [],
+            "playModeEnumValue": "ON_DEMAND",
+            "queueSeedType": "QUEUE_ID_HISTORICAL_PLAYBACK",
+            "queueSeedTypeEnumValue": "PLAYABLE_ENTITY_ID",
+            "playableEntity": {"idType": "ASIN", "id": "B079VLSTG6", "metricsContext": {"metricTuple": []}},
+        },
+    ]
+    assert "startAt" not in queue_input
+    assert transfer_body["startAt"]["trackIdentifier"] == "a3c9e1f7-2b5d-4e08-8f6a-71d4b0c2e953"
 
 
 async def test_graphql_errors_raise_without_transferring(login, aioclient_mock):
@@ -257,6 +314,34 @@ async def test_play_media_plays_comma_separated_asins_in_order(echo, aioclient_m
 async def test_play_media_rejects_anything_but_asins_before_calling_amazon(echo, aioclient_mock, media_id, error):
     with pytest.raises(HomeAssistantError, match=error):
         await echo.async_play_media("AMAZON_MUSIC_ASIN", media_id)
+
+    assert aioclient_mock.call_count == 0
+
+
+async def test_play_media_plays_comma_separated_albums_in_order_on_this_echo(echo, aioclient_mock):
+    aioclient_mock.post(APPSYNC_URL, json=INITIATE_QUEUE_ALBUM_RESPONSE)
+    aioclient_mock.post(MPQS_URL, json=TRANSFER_QUEUE_SUCCESS)
+
+    await echo.async_play_media("AMAZON_MUSIC_ALBUM", " B09C46238P, ,B079VLSTG6 ")
+
+    (_, initiate_body, _), (_, transfer_body, _) = _requests(aioclient_mock)
+    queue_seeds = initiate_body["variables"]["input"]["queueSeeds"]
+    assert [seed["playableEntity"]["id"] for seed in queue_seeds] == ["B09C46238P", "B079VLSTG6"]
+    assert transfer_body["targetId"] == "CUSTOMER-ECHO_SERIAL-ECHO_TYPE"
+    echo.alexa_api.play_music.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("media_id", "error"),
+    [
+        # A whole share link pasted instead of the ID after "albums/".
+        ("B09C46238P, https://music.amazon.de/albums/B079VLSTG6", "music.amazon.de/albums"),
+        (" , ", "No Amazon Music album ID"),
+    ],
+)
+async def test_play_media_rejects_anything_but_album_ids_before_calling_amazon(echo, aioclient_mock, media_id, error):
+    with pytest.raises(HomeAssistantError, match=error):
+        await echo.async_play_media("AMAZON_MUSIC_ALBUM", media_id)
 
     assert aioclient_mock.call_count == 0
 
